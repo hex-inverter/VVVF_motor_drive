@@ -35,11 +35,11 @@ def refresh():
     wave = np.append(wave, -wave)
     wave = np.append(wave, wave[0])
 
-    voltage = np.cumsum(np.roll(wave, wave.size // 4))
+    # voltage = np.cumsum(np.roll(wave, wave.size // 4))
 
     ax.clear()
     ax.plot(wave, drawstyle='steps-mid')
-    ax.plot(voltage, drawstyle='steps-mid')
+    # ax.plot(voltage, drawstyle='steps-mid')
 
 def swap_table(i):
     global pwm

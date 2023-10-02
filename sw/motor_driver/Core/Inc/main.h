@@ -71,10 +71,14 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define V_L_Pin LL_GPIO_PIN_9
+#define V_L_GPIO_Port GPIOB
 #define I_MEAS_Pin LL_GPIO_PIN_1
 #define I_MEAS_GPIO_Port GPIOA
 #define POT_Pin LL_GPIO_PIN_0
 #define POT_GPIO_Port GPIOB
+#define TRIG_Pin LL_GPIO_PIN_1
+#define TRIG_GPIO_Port GPIOB
 #define V_MEAS_Pin LL_GPIO_PIN_2
 #define V_MEAS_GPIO_Port GPIOB
 #define U_H_Pin LL_GPIO_PIN_3
@@ -83,8 +87,8 @@ void Error_Handler(void);
 #define U_L_GPIO_Port GPIOB
 #define V_H_Pin LL_GPIO_PIN_5
 #define V_H_GPIO_Port GPIOB
-#define V_L_Pin LL_GPIO_PIN_6
-#define V_L_GPIO_Port GPIOB
+#define DEAD_Pin LL_GPIO_PIN_6
+#define DEAD_GPIO_Port GPIOB
 #define W_H_Pin LL_GPIO_PIN_7
 #define W_H_GPIO_Port GPIOB
 #define W_L_Pin LL_GPIO_PIN_8

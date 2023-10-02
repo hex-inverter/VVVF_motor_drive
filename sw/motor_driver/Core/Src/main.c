@@ -42,20 +42,22 @@ typedef struct ADC_meas_s{
 
 const uint32_t CLK_FREQ = 64000000;
 const uint32_t MAX_I_SHTDWN = 1500; /* in mA */
-const uint32_t F_MAX = 670; /* in Hz */
-const uint32_t DELTA_F = 10; /* Hz/s */
+const uint32_t F_MAX = 90; /* in Hz */
+const uint32_t F_MIN = 4;
+const int32_t DELTA_F_UP = 5; // units of 2^16/65507 (almost 1) Hz/s
+const int32_t DELTA_F_DN = -10;
 const uint32_t PERIOD_FULL = UINT32_MAX;
 const uint32_t PERIOD_ONE_THIRD = PERIOD_FULL / 3;
 const uint32_t PERIOD_TWO_THIRD = PERIOD_FULL / 3 * 2;
 
-const uint32_t SAMPLES_PER_S = PERIOD_FULL >> 20;
+#define TIM_DIV 977
+const uint32_t TIM_TRIG_FREQ = CLK_FREQ / TIM_DIV; // approx 65507 Hz, input 2^16 step for 1 Hz
 
-
-
-const uint32_t TIM_TRIG_FREQ = CLK_FREQ/640;
-
-const uint32_t U_NOM = 195;
+const uint32_t U_NOM = 195; // HACK
 const uint32_t F_NOM = 310;
+
+// 191156419 = sqrt(2) (peak) * 4096 (ADC) * 3300 (R2) * 10 (VDD=34/10)
+const uint32_t VF_MAGIC_NUMBER = 589303; //191156419 << 16 * U_NOM / (F_NOM * 34 * 393300);
 
 /* USER CODE END PD */
 
@@ -80,13 +82,17 @@ ADC_meas_t adc_meas;
  */
 uint32_t phase_accumulator;
 
-uint32_t f_current; /* in samples*/
-uint32_t f_target; /* in samples*/
+volatile uint32_t f_target; // in (2^-16) Hz
+volatile uint32_t vf_coef;
 
 uint8_t *p_current_table;
 uint16_t current_gear;
 
 uint32_t i_offset = 0;
+
+uint32_t i_meas;
+
+
 
 /* USER CODE END PV */
 
@@ -170,19 +176,6 @@ int main(void)
   LL_ADC_Disable(ADC1);
   adc_meas.current = LL_ADC_REG_ReadConversionData12(ADC1);
 
-  /*read pot*/
-  ADC1->CHSELR = (1 << 8);
-  while(LL_ADC_IsActiveFlag_CCRDY(ADC1) == 0);
-  LL_ADC_ClearFlag_CCRDY(ADC1);
-  LL_ADC_Enable(ADC1);
-  while(LL_ADC_IsActiveFlag_ADRDY(ADC1) == 0);
-  LL_ADC_ClearFlag_ADRDY(ADC1);
-  LL_ADC_REG_StartConversion(ADC1);
-  while(LL_ADC_IsActiveFlag_EOC(ADC1) == 0);
-  LL_ADC_ClearFlag_EOC(ADC1);
-  LL_ADC_Disable(ADC1);
-  adc_meas.pot = LL_ADC_REG_ReadConversionData12(ADC1);
-
   /*read voltage*/
   ADC1->CHSELR = (1 << 10);
   while(LL_ADC_IsActiveFlag_CCRDY(ADC1) == 0);
@@ -208,48 +201,76 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  /*read current*/
-	  ADC1->CHSELR = (1 << 1);
-	  while(LL_ADC_IsActiveFlag_CCRDY(ADC1) == 0);
-	  LL_ADC_ClearFlag_CCRDY(ADC1);
-	  LL_ADC_Enable(ADC1);
-	  while(LL_ADC_IsActiveFlag_ADRDY(ADC1) == 0);
-	  LL_ADC_ClearFlag_ADRDY(ADC1);
-	  LL_ADC_REG_StartConversion(ADC1);
-	  while(LL_ADC_IsActiveFlag_EOC(ADC1) == 0);
-	  LL_ADC_ClearFlag_EOC(ADC1);
-	  LL_ADC_Disable(ADC1);
-	  adc_meas.current = LL_ADC_REG_ReadConversionData12(ADC1);
+		/* convert ADC values
+		 *
+		 * V_meas = ( Vref * ADC_data / ADC_resolution) * ( (R2 + R1) / R2 )
+		 * I_meas = Uref * ADC_data / ( ADC_resolution * R_shunt * A_opamp)
+		 */
 
-	  /*read pot*/
-	  ADC1->CHSELR = (1 << 8);
-	  while(LL_ADC_IsActiveFlag_CCRDY(ADC1) == 0);
-	  LL_ADC_ClearFlag_CCRDY(ADC1);
-	  LL_ADC_Enable(ADC1);
-	  while(LL_ADC_IsActiveFlag_ADRDY(ADC1) == 0);
-	  LL_ADC_ClearFlag_ADRDY(ADC1);
-	  LL_ADC_REG_StartConversion(ADC1);
-	  while(LL_ADC_IsActiveFlag_EOC(ADC1) == 0);
-	  LL_ADC_ClearFlag_EOC(ADC1);
-	  LL_ADC_Disable(ADC1);
-	  adc_meas.pot = LL_ADC_REG_ReadConversionData12(ADC1);
-
-	  /*read voltage*/
-	  ADC1->CHSELR = (1 << 10);
-	  while(LL_ADC_IsActiveFlag_CCRDY(ADC1) == 0);
-	  LL_ADC_ClearFlag_CCRDY(ADC1);
-	  LL_ADC_Enable(ADC1);
-	  while(LL_ADC_IsActiveFlag_ADRDY(ADC1) == 0);
-	  LL_ADC_ClearFlag_ADRDY(ADC1);
-	  LL_ADC_REG_StartConversion(ADC1);
-	  while(LL_ADC_IsActiveFlag_EOC(ADC1) == 0);
-	  LL_ADC_ClearFlag_EOC(ADC1);
-	  LL_ADC_Disable(ADC1);
-	  adc_meas.voltage = LL_ADC_REG_ReadConversionData12(ADC1);
-    /* USER CODE END WHILE */
+		/*read current*/
+		ADC1->CHSELR = (1 << 1);
+		while(LL_ADC_IsActiveFlag_CCRDY(ADC1) == 0);
+		LL_ADC_ClearFlag_CCRDY(ADC1);
+		LL_ADC_Enable(ADC1);
+		while(LL_ADC_IsActiveFlag_ADRDY(ADC1) == 0);
+		LL_ADC_ClearFlag_ADRDY(ADC1);
+		LL_ADC_REG_StartConversion(ADC1);
+		while(LL_ADC_IsActiveFlag_EOC(ADC1) == 0);
+		LL_ADC_ClearFlag_EOC(ADC1);
+		LL_ADC_Disable(ADC1);
+		adc_meas.current = LL_ADC_REG_ReadConversionData12(ADC1);
 
 
-    /* USER CODE BEGIN 3 */
+		i_meas = ((3300 / 22 * 20) * adc_meas.current) / (1<<12); /* in mA */
+		/*check if current is too high */
+		if(i_meas > MAX_I_SHTDWN)
+		{
+			Error_Handler();
+		}
+
+
+		/*read pot*/
+		ADC1->CHSELR = (1 << 8);
+		while(LL_ADC_IsActiveFlag_CCRDY(ADC1) == 0);
+		LL_ADC_ClearFlag_CCRDY(ADC1);
+		LL_ADC_Enable(ADC1);
+		while(LL_ADC_IsActiveFlag_ADRDY(ADC1) == 0);
+		LL_ADC_ClearFlag_ADRDY(ADC1);
+		LL_ADC_REG_StartConversion(ADC1);
+		while(LL_ADC_IsActiveFlag_EOC(ADC1) == 0);
+		LL_ADC_ClearFlag_EOC(ADC1);
+		LL_ADC_Disable(ADC1);
+		adc_meas.pot = LL_ADC_REG_ReadConversionData12(ADC1);
+
+		/* calculate target frequency */
+		f_target = adc_meas.pot * F_MAX * (1 << 4); // adc goes to 12 bits, 1 Hz is 16 bits
+		if(f_target < (F_MIN * (1 << 16))) {
+			f_target = F_MIN * (1 << 16);
+		}
+
+		/*read voltage*/
+		ADC1->CHSELR = (1 << 10);
+		while(LL_ADC_IsActiveFlag_CCRDY(ADC1) == 0);
+		LL_ADC_ClearFlag_CCRDY(ADC1);
+		LL_ADC_Enable(ADC1);
+		while(LL_ADC_IsActiveFlag_ADRDY(ADC1) == 0);
+		LL_ADC_ClearFlag_ADRDY(ADC1);
+		LL_ADC_REG_StartConversion(ADC1);
+		while(LL_ADC_IsActiveFlag_EOC(ADC1) == 0);
+		LL_ADC_ClearFlag_EOC(ADC1);
+		LL_ADC_Disable(ADC1);
+		adc_meas.voltage = LL_ADC_REG_ReadConversionData12(ADC1);
+
+
+		// calculate the V/f coefficient so the ISR can determine the voltage
+//		vf_coef = VF_MAGIC_NUMBER / adc_meas.voltage; // TODO
+		vf_coef = 179; // multiplied by 256
+
+
+//		v_meas = 3300 * adc_meas.voltage * (39120 + 336) / 336 / (1<<12); /* in mV */
+		/* USER CODE END WHILE */
+
+		/* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
 }
@@ -444,7 +465,7 @@ static void MX_TIM1_Init(void)
   /* USER CODE END TIM1_Init 1 */
   TIM_InitStruct.Prescaler = 0;
   TIM_InitStruct.CounterMode = LL_TIM_COUNTERMODE_DOWN;
-  TIM_InitStruct.Autoreload = 640;
+  TIM_InitStruct.Autoreload = TIM_DIV;
   TIM_InitStruct.ClockDivision = LL_TIM_CLOCKDIVISION_DIV1;
   TIM_InitStruct.RepetitionCounter = 0;
   LL_TIM_Init(TIM1, &TIM_InitStruct);
@@ -454,7 +475,7 @@ static void MX_TIM1_Init(void)
   LL_TIM_SetTriggerOutput2(TIM1, LL_TIM_TRGO2_RESET);
   LL_TIM_DisableMasterSlaveMode(TIM1);
   /* USER CODE BEGIN TIM1_Init 2 */
-
+  TIM1->ARR = TIM_DIV;
   /* USER CODE END TIM1_Init 2 */
 
 }
@@ -471,26 +492,45 @@ static void MX_GPIO_Init(void)
 /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
-  LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
   LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOB);
-
-  /**/
-  LL_GPIO_ResetOutputPin(U_H_GPIO_Port, U_H_Pin);
-
-  /**/
-  LL_GPIO_ResetOutputPin(U_L_GPIO_Port, U_L_Pin);
-
-  /**/
-  LL_GPIO_ResetOutputPin(V_H_GPIO_Port, V_H_Pin);
+  LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
 
   /**/
   LL_GPIO_ResetOutputPin(V_L_GPIO_Port, V_L_Pin);
 
   /**/
+  LL_GPIO_ResetOutputPin(TRIG_GPIO_Port, TRIG_Pin);
+
+  /**/
+  LL_GPIO_ResetOutputPin(U_H_GPIO_Port, U_H_Pin);
+
+  /**/
+  LL_GPIO_ResetOutputPin(V_H_GPIO_Port, V_H_Pin);
+
+  /**/
   LL_GPIO_ResetOutputPin(W_H_GPIO_Port, W_H_Pin);
 
   /**/
-  LL_GPIO_ResetOutputPin(W_L_GPIO_Port, W_L_Pin);
+  LL_GPIO_SetOutputPin(U_L_GPIO_Port, U_L_Pin);
+
+  /**/
+  LL_GPIO_SetOutputPin(W_L_GPIO_Port, W_L_Pin);
+
+  /**/
+  GPIO_InitStruct.Pin = V_L_Pin;
+  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
+  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+  LL_GPIO_Init(V_L_GPIO_Port, &GPIO_InitStruct);
+
+  /**/
+  GPIO_InitStruct.Pin = TRIG_Pin;
+  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
+  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+  LL_GPIO_Init(TRIG_GPIO_Port, &GPIO_InitStruct);
 
   /**/
   GPIO_InitStruct.Pin = U_H_Pin;
@@ -517,12 +557,10 @@ static void MX_GPIO_Init(void)
   LL_GPIO_Init(V_H_GPIO_Port, &GPIO_InitStruct);
 
   /**/
-  GPIO_InitStruct.Pin = V_L_Pin;
-  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
-  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+  GPIO_InitStruct.Pin = DEAD_Pin;
+  GPIO_InitStruct.Mode = LL_GPIO_MODE_ANALOG;
   GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
-  LL_GPIO_Init(V_L_GPIO_Port, &GPIO_InitStruct);
+  LL_GPIO_Init(DEAD_GPIO_Port, &GPIO_InitStruct);
 
   /**/
   GPIO_InitStruct.Pin = W_H_Pin;
@@ -555,51 +593,25 @@ void switch_table(int8_t change)
 
 void increment_accumulator(void)
 {
-	/* convert ADC values
-	 *
-	 * V_meas = ( Vref * ADC_data / ADC_resolution) * ( (R2 + R1) / R2 )
-	 * I_meas = Uref * ADC_data / ( ADC_resolution * R_shunt * A_opamp)
-	 */
-	uint32_t v_meas = 3300 * adc_meas.voltage * (39120 + 336) / 336 / (1<<12); /* in mV */
-	uint32_t i_meas = ((3300 / 22 * 20) * adc_meas.current) / (1<<12); /* in mA */
-
-	/*check if current is too high */
-	if(i_meas > MAX_I_SHTDWN)
-	{
-		Error_Handler();
-	}
-
-	/* calculate target frequency */
-	f_target = PERIOD_FULL / TIM_TRIG_FREQ * F_MAX / (1<<12) * adc_meas.pot ;
-	if(f_target < 2 * (PERIOD_FULL / TIM_TRIG_FREQ)  )
-	{
-		f_target = 2 * (PERIOD_FULL / TIM_TRIG_FREQ);
-	}
+	static uint32_t f_current;
+//	LL_GPIO_SetOutputPin(GPIOB, (1<<1));
 
 	/* calculate new frequency */
 	/* is frequency increasing or decreasing? */
-	int8_t f_change_direction = (f_target >= f_current) ? 1 : -1;
-	int32_t f_change;
+	const int32_t f_diff = f_target - f_current;
 
-	uint32_t f_diff;
-	if(f_target > f_current)
+	if(f_diff > DELTA_F_UP)
 	{
-		f_diff = f_target > f_current;
+		f_current += DELTA_F_UP;
+	}
+	else if (f_diff < DELTA_F_DN)
+	{
+		f_current += DELTA_F_DN;
 	}
 	else
 	{
-		f_diff = f_current - f_target;
+		f_current += f_diff;
 	}
-
-	if( ( DELTA_F * (PERIOD_FULL / TIM_TRIG_FREQ) ) < f_diff )
-	{
-		f_change = DELTA_F * (PERIOD_FULL / TIM_TRIG_FREQ) * f_change_direction;
-	}
-	else
-	{
-		f_change = f_diff * f_change_direction;
-	}
-	f_current += f_change;
 
 
 	/* check if gear switch is needed */
@@ -616,20 +628,15 @@ void increment_accumulator(void)
 	/* increment phase accumulator */
 	phase_accumulator += f_current;
 
-	/* calculate new threshold
-	 *
-	 * V_target = {V/f const} * f_current
-	 * threshold = min(V_target * 255 / V_meas, 255);
-	 */
-	uint32_t v_target = (1414 * f_current * TIM_TRIG_FREQ) / F_NOM * U_NOM / PERIOD_FULL; // peak (sqrt2), in mV
-	uint32_t mod_target = v_target * 255 / v_meas;
-	uint32_t threshold = mod_target;
-	if (threshold < 15) {
-		threshold = 15;
+
+	// determine modulation index
+	uint32_t threshold = (vf_coef * f_current) >> 24; // 16b from freq, 8b from vf_coef
+	if (threshold < 2) {
+		// TODO: base boost?
+		threshold = 2; // TODO: calculate this?, change for full voltage
 	} else if (threshold > 255) {
 		threshold = 255;
 	}
-	threshold = 200; // TODO: remove debug code
 
 	/* extract pointer and set new output values */
 	uint32_t gpio_reg_write = 0;
@@ -638,36 +645,37 @@ void increment_accumulator(void)
 	uint32_t sign_and_index = phase_accumulator >> 20;
 	if((p_current_table[(sign_and_index & 0x7FF)] > threshold) ^ ((sign_and_index >> 11) & 0x1) )
 	{
-//		gpio_reg_write = (1 << 3);
+		gpio_reg_write = U_H_Pin;
 	}
 	else
 	{
-//		gpio_reg_write = (1 << 4);
+		gpio_reg_write = U_L_Pin;
 	}
 
 	/* set phase V pins */
 	sign_and_index = (phase_accumulator+PERIOD_ONE_THIRD) >> 20;
-	gpio_reg_write |= ((sign_and_index >> 11) & 1) << 4; // TODO: remove debug code
+
 	if((p_current_table[(sign_and_index & 0x7FF)] > threshold) ^ ((sign_and_index >> 11) & 0x1) )
 	{
-		gpio_reg_write |= (1 << 5);
+		gpio_reg_write |= V_H_Pin;
 	}
 	else
 	{
-		gpio_reg_write |= (1 << 6);
+		gpio_reg_write |= V_L_Pin;
 	}
 
 	/* set phase W pins */
 	sign_and_index = (phase_accumulator+PERIOD_TWO_THIRD) >> 20;
 	if((p_current_table[(sign_and_index & 0x7FF)] > threshold) ^ ((sign_and_index >> 11) & 0x1) )
 	{
-		gpio_reg_write |= (1 << 7);
+		gpio_reg_write |= W_H_Pin;
 	}
 	else
 	{
-		gpio_reg_write |= (1 << 8);
+		gpio_reg_write |= W_L_Pin;
 	}
 
+	gpio_reg_write |= ((sign_and_index >> 11) & 1) << 1; // scope trigger
 	 LL_GPIO_WriteOutputPort(GPIOB, gpio_reg_write);
 }
 
