@@ -41,9 +41,10 @@ typedef struct ADC_meas_s{
 //volatile uint8_t LED_STATE = 0;
 
 const uint32_t CLK_FREQ = 64000000;
-const uint32_t MAX_I_SHTDWN = 1500; /* in mA */
-const uint32_t F_MAX = 90; /* in Hz */
-const uint32_t F_MIN = 4;
+//const uint32_t MAX_I_SHTDWN = 1500; /* in mA */
+const uint32_t MAX_I_SHTDWN = 3500; /* in mA */
+const uint32_t F_MAX = 200; /* in Hz */
+const uint32_t F_MIN = 2;
 const int32_t DELTA_F_UP = 5; // units of 2^16/65507 (almost 1) Hz/s
 const int32_t DELTA_F_DN = -10;
 const uint32_t PERIOD_FULL = UINT32_MAX;
@@ -264,7 +265,8 @@ int main(void)
 
 		// calculate the V/f coefficient so the ISR can determine the voltage
 //		vf_coef = VF_MAGIC_NUMBER / adc_meas.voltage; // TODO
-		vf_coef = 179; // multiplied by 256
+//		vf_coef = 179; // multiplied by 256
+		vf_coef = 728; // for 30 V DC bus
 
 
 //		v_meas = 3300 * adc_meas.voltage * (39120 + 336) / 336 / (1<<12); /* in mV */
@@ -557,12 +559,6 @@ static void MX_GPIO_Init(void)
   LL_GPIO_Init(V_H_GPIO_Port, &GPIO_InitStruct);
 
   /**/
-  GPIO_InitStruct.Pin = DEAD_Pin;
-  GPIO_InitStruct.Mode = LL_GPIO_MODE_ANALOG;
-  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
-  LL_GPIO_Init(DEAD_GPIO_Port, &GPIO_InitStruct);
-
-  /**/
   GPIO_InitStruct.Pin = W_H_Pin;
   GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
   GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
@@ -630,12 +626,24 @@ void increment_accumulator(void)
 
 
 	// determine modulation index
-	uint32_t threshold = (vf_coef * f_current) >> 24; // 16b from freq, 8b from vf_coef
-	if (threshold < 2) {
-		// TODO: base boost?
-		threshold = 2; // TODO: calculate this?, change for full voltage
-	} else if (threshold > 255) {
-		threshold = 255;
+//	uint32_t threshold = (vf_coef * f_current) >> 24; // 16b from freq, 8b from vf_coef
+//	if (threshold < 2) {
+//		// TODO: base boost?
+//		threshold = 2; // TODO: calculate this?, change for full voltage
+//	} else if (threshold > 255) {
+//		threshold = 255;
+//	}
+	uint32_t threshold = 250;
+	if (f_current < 36 * (1ULL << 16)) {
+		threshold = 200;
+	} else if (f_current < 18 * (1ULL << 16)) {
+		threshold = 100;
+	} else if (f_current < 12 * (1ULL << 16)) {
+		threshold = 30;
+	} else if (f_current < 8 * (1ULL << 16)) {
+		threshold = 15;
+	} else if (f_current < 4 * (1ULL << 16)) {
+		threshold = 5;
 	}
 
 	/* extract pointer and set new output values */
@@ -643,7 +651,7 @@ void increment_accumulator(void)
 
 	/* set phase U pins */
 	uint32_t sign_and_index = phase_accumulator >> 20;
-	if((p_current_table[(sign_and_index & 0x7FF)] > threshold) ^ ((sign_and_index >> 11) & 0x1) )
+	if((p_current_table[(sign_and_index & 0x7FF)] < threshold) ^ ((sign_and_index >> 11) & 0x1) )
 	{
 		gpio_reg_write = U_H_Pin;
 	}
@@ -655,7 +663,7 @@ void increment_accumulator(void)
 	/* set phase V pins */
 	sign_and_index = (phase_accumulator+PERIOD_ONE_THIRD) >> 20;
 
-	if((p_current_table[(sign_and_index & 0x7FF)] > threshold) ^ ((sign_and_index >> 11) & 0x1) )
+	if((p_current_table[(sign_and_index & 0x7FF)] < threshold) ^ ((sign_and_index >> 11) & 0x1) )
 	{
 		gpio_reg_write |= V_H_Pin;
 	}
@@ -666,7 +674,7 @@ void increment_accumulator(void)
 
 	/* set phase W pins */
 	sign_and_index = (phase_accumulator+PERIOD_TWO_THIRD) >> 20;
-	if((p_current_table[(sign_and_index & 0x7FF)] > threshold) ^ ((sign_and_index >> 11) & 0x1) )
+	if((p_current_table[(sign_and_index & 0x7FF)] < threshold) ^ ((sign_and_index >> 11) & 0x1) )
 	{
 		gpio_reg_write |= W_H_Pin;
 	}
@@ -676,7 +684,7 @@ void increment_accumulator(void)
 	}
 
 	gpio_reg_write |= ((sign_and_index >> 11) & 1) << 1; // scope trigger
-	 LL_GPIO_WriteOutputPort(GPIOB, gpio_reg_write);
+	LL_GPIO_WriteOutputPort(GPIOB, gpio_reg_write);
 }
 
 
