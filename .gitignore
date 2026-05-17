@@ -1,2 +1,8 @@
+# Firmware
 sw2/
 sw/.metadata/
+sw/array_generator/__pycache__/
+
+# Hardware
+hw/motor_driver/motor_driver-backup/
+
